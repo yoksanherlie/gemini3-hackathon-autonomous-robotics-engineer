@@ -1,0 +1,5 @@
+{
+  "name": "RoboLab Agent",
+  "description": "An autonomous research agent for robotics experiments using Gemini 3 Actions and Multimodal reasoning.",
+  "requestFramePermissions": []
+}
