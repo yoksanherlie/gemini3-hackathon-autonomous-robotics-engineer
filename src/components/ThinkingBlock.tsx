@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { ChevronDown, ChevronRight, BrainCircuit, CheckCircle2, Loader2, Wrench, MessageSquare, Zap } from 'lucide-react';
+import { ChevronDown, ChevronRight, BrainCircuit, CheckCircle2, Loader2, Wrench, MessageSquare, Zap, Sparkles } from 'lucide-react';
 import { ToolCall, ToolResult, ThinkingStep } from '../types';
 
 interface ThinkingBlockProps {
@@ -34,7 +34,7 @@ export const ThinkingBlock: React.FC<ThinkingBlockProps> = ({
   const getStepIcon = (step: ThinkingStep) => {
     switch (step.type) {
       case 'thinking':
-        return <BrainCircuit className="w-3 h-3 text-purple-400" />;
+        return <Sparkles className="w-3.5 h-3.5 text-purple-400" />;
       case 'tool_call':
         return <Wrench className="w-3 h-3 text-accent" />;
       case 'tool_result':
@@ -49,7 +49,7 @@ export const ThinkingBlock: React.FC<ThinkingBlockProps> = ({
   const getStepColor = (step: ThinkingStep) => {
     switch (step.type) {
       case 'thinking':
-        return 'border-l-purple-500/50';
+        return 'border-l-purple-500 border-l-[3px]';
       case 'tool_call':
         return 'border-l-accent/50';
       case 'tool_result':
@@ -61,20 +61,27 @@ export const ThinkingBlock: React.FC<ThinkingBlockProps> = ({
     }
   };
 
+  const hasThinkingContent = thinkingSteps && thinkingSteps.some(s => s.type === 'thinking');
+
   return (
-    <div className="mt-2 mb-4 rounded-lg border border-border bg-surface/30 overflow-hidden">
+    <div className={`mt-2 mb-4 rounded-lg border ${hasThinkingContent ? 'border-purple-500/30' : 'border-border'} bg-surface/30 overflow-hidden`}>
       {/* Header */}
       <button
         onClick={() => setIsExpanded(!isExpanded)}
-        className="w-full flex items-center gap-2 p-2 px-3 bg-surface/50 hover:bg-surface text-xs font-medium text-muted transition-colors"
+        className="w-full flex items-center gap-2 p-2.5 px-3 bg-gradient-to-r from-purple-500/10 to-surface/50 hover:from-purple-500/20 hover:to-surface text-xs font-medium text-muted transition-colors"
       >
         {isExpanded ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
-        <BrainCircuit className="w-3 h-3 text-accent" />
-        <span>Agent Reasoning & Actions</span>
+        <Sparkles className="w-3.5 h-3.5 text-purple-400" />
+        <span className="text-purple-300">Inner Thoughts & Actions</span>
+        {thinkingSteps && thinkingSteps.filter(s => s.type === 'thinking').length > 0 && (
+          <span className="text-[10px] bg-purple-500/20 text-purple-300 px-1.5 py-0.5 rounded">
+            {thinkingSteps.filter(s => s.type === 'thinking').length} thoughts
+          </span>
+        )}
         <span className="text-[10px] text-muted/60 ml-1">
-          ({thinkingSteps?.length || 0} steps)
+          ({thinkingSteps?.length || 0} total steps)
         </span>
-        {!isComplete && <Loader2 className="w-3 h-3 animate-spin ml-auto" />}
+        {!isComplete && <Loader2 className="w-3 h-3 animate-spin ml-auto text-purple-400" />}
         {isComplete && <CheckCircle2 className="w-3 h-3 text-green-500 ml-auto" />}
       </button>
 
@@ -88,21 +95,26 @@ export const ThinkingBlock: React.FC<ThinkingBlockProps> = ({
 
       {/* Steps Timeline */}
       {isExpanded && (
-        <div className="p-3 space-y-2 max-h-[400px] overflow-y-auto custom-scrollbar">
+        <div className="p-3 space-y-2 max-h-[500px] overflow-y-auto custom-scrollbar">
           {/* Render thinking steps if available */}
           {thinkingSteps && thinkingSteps.length > 0 ? (
             thinkingSteps.map((step, index) => (
               <div
                 key={step.id}
-                className={`pl-3 border-l-2 ${getStepColor(step)} animate-in fade-in slide-in-from-left-2 duration-300`}
+                className={`pl-3 border-l-2 ${getStepColor(step)} animate-in fade-in slide-in-from-left-2 duration-300 ${step.type === 'thinking' ? 'my-3' : ''}`}
                 style={{ animationDelay: `${index * 50}ms` }}
               >
                 <div className="flex items-start gap-2">
                   <div className="mt-0.5">{getStepIcon(step)}</div>
                   <div className="flex-1 min-w-0">
                     {step.type === 'thinking' && (
-                      <div className="text-xs text-text/80 leading-relaxed whitespace-pre-wrap">
-                        {step.content}
+                      <div className="rounded-lg bg-purple-500/10 border border-purple-500/20 p-3">
+                        <div className="flex items-center gap-1.5 mb-2">
+                          <span className="text-[10px] font-semibold uppercase tracking-wider text-purple-400">Model Reasoning</span>
+                        </div>
+                        <div className="text-xs text-text/90 leading-relaxed whitespace-pre-wrap">
+                          {step.content}
+                        </div>
                       </div>
                     )}
 

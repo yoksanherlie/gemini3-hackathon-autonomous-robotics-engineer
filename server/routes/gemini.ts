@@ -156,7 +156,7 @@ router.post('/chat', async (req: Request, res: Response) => {
             config: {
               systemInstruction: SYSTEM_INSTRUCTION,
               tools: [{ functionDeclarations: SIMULATION_TOOLS }],
-              thinkingConfig: { thinkingBudget: 32768 }
+              thinkingConfig: { thinkingBudget: 32768, includeThoughts: true }
             }
           });
 
@@ -182,7 +182,7 @@ router.post('/chat', async (req: Request, res: Response) => {
       config: {
         systemInstruction: SYSTEM_INSTRUCTION,
         tools: [{ functionDeclarations: SIMULATION_TOOLS }],
-        thinkingConfig: { thinkingBudget: 32768 },
+        thinkingConfig: { thinkingBudget: 32768, includeThoughts: true },
       }
     });
 
@@ -260,7 +260,7 @@ router.post('/chat-stream', async (req: Request, res: Response) => {
       config: {
         systemInstruction: SYSTEM_INSTRUCTION,
         tools: [{ functionDeclarations: SIMULATION_TOOLS }],
-        thinkingConfig: { thinkingBudget: 32768 },
+        thinkingConfig: { thinkingBudget: 32768, includeThoughts: true },
       }
     });
 
@@ -361,7 +361,7 @@ router.post('/tool-response', async (req: Request, res: Response) => {
       config: {
         systemInstruction: SYSTEM_INSTRUCTION + "\n\nCRITICAL: The tools have finished. Now provide a comprehensive natural language analysis of these results. Explain exactly what the data means for our objective. Do not be brief.",
         tools: [{ functionDeclarations: SIMULATION_TOOLS }],
-        thinkingConfig: { thinkingBudget: 32768 },
+        thinkingConfig: { thinkingBudget: 32768, includeThoughts: true },
       }
     });
 
@@ -413,7 +413,7 @@ router.post('/interaction', async (req: Request, res: Response) => {
       config: {
         systemInstruction: SYSTEM_INSTRUCTION,
         tools: [{ functionDeclarations: SIMULATION_TOOLS }],
-        thinkingConfig: { thinkingBudget: 32768 }
+        thinkingConfig: { thinkingBudget: 32768, includeThoughts: true }
       }
     });
 
