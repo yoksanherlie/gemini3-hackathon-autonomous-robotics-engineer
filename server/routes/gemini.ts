@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
-import { GoogleGenAI, FunctionDeclaration, Type } from '@google/genai';
+import { GoogleGenAI, FunctionDeclaration, Type, FileState } from '@google/genai';
 import dotenv from 'dotenv';
+import { simulationService } from '../services/simulation';
 
 const router = Router();
 
@@ -28,7 +29,7 @@ const SIMULATION_TOOLS: FunctionDeclaration[] = [
         terrain_type: { type: Type.STRING, description: "Type of terrain: 'sand', 'concrete', 'grass'" }
       },
       required: ["terrain_type"]
-    }
+    },
   },
   {
     name: "update_motor_params",
@@ -46,22 +47,26 @@ const SIMULATION_TOOLS: FunctionDeclaration[] = [
   },
   {
     name: "run_simulation",
-    description: "Execute a simulation run with current parameters. Returns a run ID and status.",
+    description: "Execute a simulation run with current parameters. Returns a run ID and status. For drones/UAVs, include robot_type to get flight-specific metrics (hover_accuracy, altitude_stability, flight_path).",
     parameters: {
       type: Type.OBJECT,
       properties: {
-        duration_seconds: { type: Type.NUMBER, description: "Duration to simulate" }
+        duration_seconds: { type: Type.NUMBER, description: "Duration to simulate in seconds" },
+        robot_type: { type: Type.STRING, description: "Type of robot: 'hexapod', 'quadruped', 'drone', 'uav', 'quadcopter', or 'aerial'. Use drone/uav/quadcopter/aerial for flying robots." },
+        wind_speed: { type: Type.NUMBER, description: "Wind speed in m/s (for drone simulations, default: 2.0)" },
+        airspace_condition: { type: Type.STRING, description: "Airspace condition for drones: 'calm', 'light_wind', 'gusty', or 'turbulent'" }
       }
     }
   },
   {
     name: "analyze_simulation_video",
-    description: "Analyze the visual feed of a specific simulation run to detect failures.",
+    description: "Analyze the visual feed of a specific simulation run to detect failures. For drone flights (run_id starting with 'flight_'), provides flight-specific analysis including wind compensation, GPS anomalies, and rotor performance.",
     parameters: {
       type: Type.OBJECT,
       properties: {
-        run_id: { type: Type.STRING, description: "The ID of the simulation run" },
-        focus_area: { type: Type.STRING, description: "Specific part to look at (e.g., 'front_left_leg')" }
+        run_id: { type: Type.STRING, description: "The ID of the simulation run (e.g., 'sim_xxx' for ground robots, 'flight_xxx' for drones)" },
+        focus_area: { type: Type.STRING, description: "Specific part to analyze (e.g., 'front_left_leg' for ground robots, 'rotor_fr' for drones)" },
+        robot_type: { type: Type.STRING, description: "Type of robot: 'hexapod', 'quadruped', 'drone', 'uav', 'quadcopter', or 'aerial'" }
       },
       required: ["run_id"]
     }
@@ -130,6 +135,58 @@ Structure your responses with clear Markdown headings:
 const activeInteractions = new Map<string, any>();
 
 /**
+ * Upload a video from a URL to the Gemini File API.
+ * Fetches bytes from the URL, uploads to Gemini, polls until ACTIVE.
+ * Returns { uri, mimeType } for use in content parts.
+ */
+async function uploadVideoToGemini(videoUrl: string): Promise<{ uri: string; mimeType: string }> {
+  // Fetch video bytes from R2
+  const videoResponse = await fetch(videoUrl);
+  if (!videoResponse.ok) {
+    throw new Error(`Failed to fetch video from ${videoUrl}: ${videoResponse.status}`);
+  }
+
+  const videoBuffer = Buffer.from(await videoResponse.arrayBuffer());
+  const mimeType = videoResponse.headers.get('content-type') || 'video/mp4';
+
+  // Upload to Gemini File API
+  const uploadedFile = await client.files.upload({
+    file: new Blob([videoBuffer], { type: mimeType }),
+    config: { mimeType }
+  });
+
+  if (!uploadedFile.name) {
+    throw new Error('Gemini file upload returned no file name');
+  }
+
+  // Poll until the file is ACTIVE (processed by Gemini)
+  const maxWaitMs = 120_000; // 2-minute timeout
+  const pollIntervalMs = 2_000;
+  const startTime = Date.now();
+
+  let fileState = uploadedFile.state;
+  let fileUri = uploadedFile.uri || '';
+
+  while (fileState !== FileState.ACTIVE) {
+    if (Date.now() - startTime > maxWaitMs) {
+      throw new Error(`Video processing timed out after ${maxWaitMs / 1000}s`);
+    }
+
+    if (fileState === FileState.FAILED) {
+      throw new Error('Gemini file processing failed');
+    }
+
+    await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
+
+    const polledFile = await client.files.get({ name: uploadedFile.name! });
+    fileState = polledFile.state;
+    fileUri = polledFile.uri || fileUri;
+  }
+
+  return { uri: fileUri, mimeType };
+}
+
+/**
  * POST /api/gemini/chat
  * Send a message and get a response (non-streaming for simplicity)
  */
@@ -153,11 +210,9 @@ router.post('/chat', async (req: Request, res: Response) => {
             model: MODELS.FOREGROUND,
             input: newMessage,
             previous_interaction_id: previousInteractionId,
-            config: {
-              systemInstruction: SYSTEM_INSTRUCTION,
-              tools: [{ functionDeclarations: SIMULATION_TOOLS }],
-              thinkingConfig: { thinkingBudget: 32768, includeThoughts: true }
-            }
+            systemInstruction: SYSTEM_INSTRUCTION,
+            tools: [...SIMULATION_TOOLS.map(tool => ( { ...tool, type: 'function'}))],
+            // thinkingConfig: { thinkingBudget: 32768, includeThoughts: true }
           });
 
           const responseText = interaction.outputs?.[0]?.text || interaction.output?.text || '';
@@ -322,12 +377,33 @@ router.post('/chat-stream', async (req: Request, res: Response) => {
  */
 router.post('/tool-response', async (req: Request, res: Response) => {
   try {
-    const { messages, initialText, toolCalls, toolResults } = req.body;
+    const { messages, initialText, toolCalls, toolResults, videoUrl } = req.body;
 
     // Set up SSE headers
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
+
+    // Build the user role parts (function responses + optional video)
+    const userParts: any[] = toolResults.map((tr: any) => ({ functionResponse: tr }));
+
+    // If a video URL was provided, upload it to Gemini for multimodal analysis
+    let videoSystemAddendum = '';
+    if (videoUrl) {
+      try {
+        sendSSE(res, 'status', { status: 'Uploading video for analysis...' });
+        const { uri: fileUri, mimeType } = await uploadVideoToGemini(videoUrl);
+        sendSSE(res, 'status', { status: 'Video uploaded. Analyzing with Gemini...' });
+
+        // Add fileData part so Gemini can see the actual video
+        userParts.push({ fileData: { fileUri, mimeType } });
+
+        videoSystemAddendum = `\n\nIMPORTANT: A simulation video has been attached. Analyze the visual content in the video alongside the telemetry data. Describe what you observe in the video — robot movements, terrain interaction, failure modes, and any visual anomalies. Correlate visual observations with the telemetry findings.`;
+      } catch (videoError: any) {
+        console.warn('Failed to upload video to Gemini, continuing without video:', videoError.message);
+        sendSSE(res, 'status', { status: 'Video upload failed — analyzing telemetry only...' });
+      }
+    }
 
     // Build contents including tool calls and results
     const contents = [
@@ -349,7 +425,7 @@ router.post('/tool-response', async (req: Request, res: Response) => {
           })
         ]
       },
-      { role: 'user', parts: toolResults.map((tr: any) => ({ functionResponse: tr })) }
+      { role: 'user', parts: userParts }
     ];
 
     sendSSE(res, 'status', { status: 'Analyzing tool results...' });
@@ -359,7 +435,7 @@ router.post('/tool-response', async (req: Request, res: Response) => {
       model: MODELS.FOREGROUND,
       contents: contents,
       config: {
-        systemInstruction: SYSTEM_INSTRUCTION + "\n\nCRITICAL: The tools have finished. Now provide a comprehensive natural language analysis of these results. Explain exactly what the data means for our objective. Do not be brief.",
+        systemInstruction: SYSTEM_INSTRUCTION + "\n\nCRITICAL: The tools have finished. Now provide a comprehensive natural language analysis of these results. Explain exactly what the data means for our objective. Do not be brief." + videoSystemAddendum,
         tools: [{ functionDeclarations: SIMULATION_TOOLS }],
         thinkingConfig: { thinkingBudget: 32768, includeThoughts: true },
       }
@@ -392,51 +468,120 @@ router.post('/tool-response', async (req: Request, res: Response) => {
 
 /**
  * POST /api/gemini/interaction
- * Create or continue an interaction (for stateful conversations)
+ * Create an interaction with a server-side tool call loop.
+ * Streams progress via SSE: tool_start, tool_end, text, progress, done.
+ * The server executes tools and feeds results back to the Interactions API
+ * until the model produces a final text response.
  */
 router.post('/interaction', async (req: Request, res: Response) => {
   try {
-    const { input, previousInteractionId, background } = req.body;
+    const { input, previousInteractionId, sessionId, maxIterations } = req.body;
 
     const interactionsApi = (client as any).interactions;
     if (!interactionsApi) {
       return res.status(501).json({ error: 'Interactions API not available' });
     }
 
-    const model = background ? MODELS.BACKGROUND : MODELS.FOREGROUND;
+    // Set up SSE headers
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
 
-    const interaction = await interactionsApi.create({
-      model: model,
+    const maxIter = maxIterations || 50; // safety limit
+    let iterationCount = 0;
+
+    // Create initial interaction
+    let interaction = await interactionsApi.create({
+      model: MODELS.FOREGROUND,
       input: input,
-      previous_interaction_id: previousInteractionId,
-      background: background,
-      config: {
-        systemInstruction: SYSTEM_INSTRUCTION,
-        tools: [{ functionDeclarations: SIMULATION_TOOLS }],
-        thinkingConfig: { thinkingBudget: 32768, includeThoughts: true }
+      ...(previousInteractionId && { previous_interaction_id: previousInteractionId }),
+      systemInstruction: SYSTEM_INSTRUCTION,
+      tools: [...SIMULATION_TOOLS.map(tool => ({ ...tool, type: 'function' }))],
+    });
+
+    let currentInteractionId = interaction.id;
+    sendSSE(res, 'status', { status: 'Interaction created' });
+
+    // Tool call loop — keep going until the model stops calling tools
+    let loopCount = 0;
+    const maxLoops = maxIter * 3; // each iteration may have multiple tool calls
+
+    while (loopCount < maxLoops) {
+      loopCount++;
+
+      const functionCalls = extractInteractionFunctionCalls(interaction);
+      const textOutput = extractInteractionText(interaction);
+
+      if (textOutput) {
+        sendSSE(res, 'text', { content: textOutput });
       }
-    });
 
-    // Map status
-    const mapStatus = (status: string) => {
-      if (status === 'completed') return 'completed';
-      if (status === 'failed' || status === 'cancelled') return 'failed';
-      if (status === 'in_progress' || status === 'requires_action') return 'in_progress';
-      return 'pending';
-    };
+      if (!functionCalls || functionCalls.length === 0) {
+        // No more tool calls — model is done
+        break;
+      }
 
-    res.json({
-      id: interaction.id,
-      status: mapStatus(interaction.status || 'pending'),
-      text: interaction.outputs?.[0]?.text || interaction.output?.text || '',
-      functionCalls: interaction.outputs?.[0]?.functionCalls || interaction.output?.functionCalls,
-      progress: interaction.progress,
-      iterationCount: interaction.iterationCount
+      // Execute each tool call and collect results
+      const toolResultInputs: any[] = [];
+      for (const call of functionCalls) {
+        const callId = call.id || `call_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`;
+        const callName = call.name;
+        const callArgs = call.arguments || call.args || {};
+
+        sendSSE(res, 'tool_start', { id: callId, name: callName, args: callArgs });
+
+        const result = await simulationService.execute(
+          sessionId || 'default',
+          callName,
+          callArgs
+        );
+
+        sendSSE(res, 'tool_end', { id: callId, name: callName, result });
+
+        // Track simulation runs as iterations
+        if (callName === 'run_simulation') {
+          iterationCount++;
+          sendSSE(res, 'progress', { iterationCount, maxIterations: maxIter });
+        }
+
+        toolResultInputs.push({
+          type: 'function_result',
+          name: callName,
+          call_id: callId,
+          result: JSON.stringify(result.success ? result.result : { error: result.error })
+        });
+      }
+
+      // Send tool results back to the Interactions API
+      sendSSE(res, 'status', { status: 'Analyzing results...' });
+      interaction = await interactionsApi.create({
+        model: MODELS.FOREGROUND,
+        previous_interaction_id: currentInteractionId,
+        input: toolResultInputs,
+        systemInstruction: SYSTEM_INSTRUCTION,
+        tools: [...SIMULATION_TOOLS.map(tool => ({ ...tool, type: 'function' }))],
+      });
+
+      currentInteractionId = interaction.id;
+    }
+
+    // Extract final text
+    const finalText = extractInteractionText(interaction);
+    sendSSE(res, 'done', {
+      text: finalText,
+      interactionId: currentInteractionId,
+      iterationCount
     });
+    res.end();
 
   } catch (error: any) {
     console.error('Interaction error:', error);
-    res.status(500).json({ error: error.message || 'Failed to create interaction' });
+    if (!res.headersSent) {
+      res.status(500).json({ error: error.message || 'Failed to create interaction' });
+    } else {
+      sendSSE(res, 'error', { message: error.message || 'Interaction failed' });
+      res.end();
+    }
   }
 });
 
@@ -499,6 +644,48 @@ router.delete('/interaction/:id', async (req: Request, res: Response) => {
   }
 });
 
+/**
+ * POST /api/gemini/execute-tool
+ * Execute a simulation tool with session-isolated state
+ */
+router.post('/execute-tool', async (req: Request, res: Response) => {
+  const { sessionId, toolName, args } = req.body;
+
+  console.log(`[execute-tool] Session: ${sessionId}, Tool: ${toolName}`, args);
+
+  if (!sessionId) {
+    return res.status(400).json({
+      success: false,
+      error: { code: 'MISSING_SESSION', message: 'sessionId is required', recoverable: true }
+    });
+  }
+
+  if (!toolName) {
+    return res.status(400).json({
+      success: false,
+      error: { code: 'MISSING_TOOL', message: 'toolName is required', recoverable: true }
+    });
+  }
+
+  try {
+    const result = await simulationService.execute(sessionId, toolName, args || {});
+
+    res.json(result);
+
+  } catch (error: any) {
+    console.error('[execute-tool] Unexpected error:', error);
+    res.status(500).json({
+      success: false,
+      error: {
+        code: 'INTERNAL_ERROR',
+        message: error.message || 'Internal server error',
+        recoverable: false
+      },
+      executionTimeMs: 0
+    });
+  }
+});
+
 // Helper function to send SSE events
 function sendSSE(res: Response, event: string, data: any) {
   res.write(`event: ${event}\n`);
@@ -519,6 +706,35 @@ function extractThinkingContent(interaction: any): string[] {
     }
   }
   return thinking;
+}
+
+// Helper to extract function calls from an Interactions API response
+function extractInteractionFunctionCalls(interaction: any): any[] {
+  const calls: any[] = [];
+  const outputs = interaction.outputs || (interaction.output ? [interaction.output] : []);
+  for (const output of outputs) {
+    // Format: { type: "function_call", name, arguments, id }
+    if (output?.type === 'function_call') {
+      calls.push(output);
+    }
+    // Format: { functionCalls: [...] }
+    if (output?.functionCalls) {
+      calls.push(...output.functionCalls);
+    }
+  }
+  return calls;
+}
+
+// Helper to extract text from an Interactions API response
+function extractInteractionText(interaction: any): string {
+  const outputs = interaction.outputs || (interaction.output ? [interaction.output] : []);
+  const texts: string[] = [];
+  for (const output of outputs) {
+    if (output?.text && output?.type !== 'function_call') {
+      texts.push(output.text);
+    }
+  }
+  return texts.join('');
 }
 
 // Helper to extract thinking from candidates

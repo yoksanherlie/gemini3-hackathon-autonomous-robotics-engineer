@@ -3,54 +3,60 @@ import { Message, ToolCall, ToolResult, InteractionState, ThinkingStep } from ".
 // API base URL - proxied through Vite in development
 const API_BASE = '/api/gemini';
 
-// Mock Execution Logic (runs on frontend for now)
-const executeTool = async (name: string, args: any): Promise<any> => {
-  console.log(`Executing tool: ${name}`, args);
-  await new Promise(resolve => setTimeout(resolve, 1500)); // Simulate latency
+// Tool Execution Result from backend
+interface ToolExecutionResponse {
+  success: boolean;
+  result?: any;
+  error?: { code: string; message: string; recoverable: boolean };
+  executionTimeMs: number;
+}
 
-  switch (name) {
-    case "configure_physics":
-      return { status: "success", message: `Physics updated: Terrain=${args.terrain_type}, Friction=${args.friction_coefficient || 'default'}` };
-    case "update_motor_params":
-      return { status: "success", message: `Motor ${args.joint_id} updated. P=${args.pid_p || 1.0}` };
-    case "run_simulation":
+/**
+ * Execute a tool via the backend simulation service
+ */
+const executeToolRemote = async (sessionId: string, name: string, args: any): Promise<any> => {
+  console.log(`[executeToolRemote] Session: ${sessionId}, Tool: ${name}`, args);
+
+  try {
+    const response = await fetch(`${API_BASE}/execute-tool`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        sessionId,
+        toolName: name,
+        args
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+
+    const result: ToolExecutionResponse = await response.json();
+
+    console.log(`[executeToolRemote] ${name} completed in ${result.executionTimeMs}ms`, result);
+
+    if (!result.success && result.error) {
       return {
-        run_id: `sim_${Math.floor(Math.random() * 10000)}`,
-        status: "completed",
-        telemetry_summary: "Instability detected at t=4.2s",
-        video_url: "https://picsum.photos/800/450?grayscale"
+        error: result.error.message,
+        code: result.error.code,
+        recoverable: result.error.recoverable
       };
-    case "analyze_simulation_video":
-      return {
-        analysis: `Visual analysis of run ${args.run_id} complete.`,
-        findings: [
-          "Slippage detected on front-left tarsus.",
-          "Body pitch exceeded 45 degrees causing rollover.",
-          "Gait phase mismatch between leg 2 and 4."
-        ],
-        confidence: 0.98
-      };
-    case "search_knowledge_base":
-      return {
-        results: [
-          { date: "2023-10-01", experiment: "Sand Gait V1", outcome: "Failed - overheating" },
-          { date: "2023-11-15", experiment: "Sand Gait V2", outcome: "Success - low speed" }
-        ]
-      };
-    case "start_autonomous_research":
-      return {
-        status: "initiated",
-        message: `Autonomous research started: ${args.research_goal}`,
-        max_iterations: args.max_iterations || 10,
-        success_criteria: args.success_criteria || "task completion"
-      };
-    default:
-      return { error: "Unknown tool" };
+    }
+
+    return result.result;
+
+  } catch (error: any) {
+    console.error(`[executeToolRemote] Error executing ${name}:`, error);
+    return {
+      error: error.message || 'Failed to execute tool',
+      code: 'NETWORK_ERROR',
+      recoverable: true
+    };
   }
 };
-
-// Sleep utility
-const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 export class GeminiService {
 
@@ -58,6 +64,7 @@ export class GeminiService {
    * Send a message using the backend API with Server-Sent Events for streaming
    */
   async sendMessage(
+    sessionId: string,
     history: Message[],
     newMessage: string,
     previousInteractionId: string | undefined,
@@ -168,6 +175,7 @@ export class GeminiService {
         onStatusUpdate("Executing tools...");
 
         const processResult = await this.processToolCalls(
+          sessionId,
           functionCalls,
           history,
           fullText,
@@ -199,6 +207,7 @@ export class GeminiService {
    * Process tool calls and get analysis from the backend
    */
   private async processToolCalls(
+    sessionId: string,
     toolCalls: Array<{ id?: string; name: string; args: Record<string, any> }>,
     history: Message[],
     initialText: string,
@@ -237,7 +246,7 @@ export class GeminiService {
       });
       onToolStart(toolCall);
 
-      const output = await executeTool(call.name, call.args);
+      const output = await executeToolRemote(sessionId, call.name, call.args);
 
       const toolResult: ToolResult = { toolId: callId, name: call.name, result: output };
       onThinkingStep({
@@ -254,6 +263,15 @@ export class GeminiService {
         name: call.name,
         response: { result: output }
       });
+    }
+
+    // Check if any tool result contains a video_url from analyze_simulation_video
+    let videoUrl: string | undefined;
+    for (const tr of toolResults) {
+      if (tr.name === 'analyze_simulation_video' && tr.response?.result?.video_url) {
+        videoUrl = tr.response.result.video_url;
+        break;
+      }
     }
 
     // Send tool results to backend for analysis
@@ -275,7 +293,8 @@ export class GeminiService {
           messages: history.map(m => ({ role: m.role, text: m.text })),
           initialText,
           toolCalls,
-          toolResults
+          toolResults,
+          videoUrl
         })
       });
 
@@ -418,9 +437,11 @@ export class GeminiService {
   }
 
   /**
-   * Run autonomous research in background mode
+   * Run autonomous research via server-side Interactions API with tool call loop.
+   * The server handles the full tool execution cycle and streams progress via SSE.
    */
   async runAutonomousResearch(
+    sessionId: string,
     researchGoal: string,
     maxIterations: number = 10,
     successCriteria: string,
@@ -463,78 +484,102 @@ Begin the research now.
     };
 
     try {
-      // Create background interaction
-      const interaction = await this.createInteraction(
-        researchPrompt,
-        previousInteractionId,
-        true // background mode
-      );
-
-      currentInteractionId = interaction.id;
-      currentState.id = currentInteractionId;
       onProgress(currentState);
 
-      // Polling loop for background task
-      while (currentState.status !== 'completed' && currentState.status !== 'failed') {
-        // Check for cancellation
-        if (abortSignal?.aborted) {
-          await this.cancelInteraction(currentInteractionId);
-          currentState.status = 'failed';
-          onProgress(currentState);
-          break;
-        }
+      // POST to /interaction — server handles the tool call loop via SSE
+      const response = await fetch(`${API_BASE}/interaction`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          input: researchPrompt,
+          previousInteractionId,
+          sessionId,
+          maxIterations
+        }),
+        signal: abortSignal
+      });
 
-        await sleep(5000); // Poll every 5 seconds
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
 
-        const updatedInteraction = await this.getInteraction(currentInteractionId);
+      const reader = response.body?.getReader();
+      if (!reader) {
+        throw new Error('No response body');
+      }
 
-        // Update state
-        currentState = {
-          id: currentInteractionId,
-          status: updatedInteraction.status,
-          progress: updatedInteraction.progress || Math.min((iterationCount / maxIterations) * 100, 99),
-          iterationCount: updatedInteraction.iterationCount || iterationCount,
-          maxIterations,
-          researchGoal
-        };
+      const decoder = new TextDecoder();
 
-        // Stream text updates
-        if (updatedInteraction.text && updatedInteraction.text !== fullText) {
-          fullText = updatedInteraction.text;
-          onTextChunk(fullText);
-        }
+      // Consume the SSE stream
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
 
-        // Process any tool calls
-        if (updatedInteraction.functionCalls && updatedInteraction.functionCalls.length > 0) {
-          for (const call of updatedInteraction.functionCalls) {
-            const callId = call.id || Math.random().toString(36).substr(2, 9);
-            onToolStart({ id: callId, name: call.name, args: call.args });
-            const output = await executeTool(call.name, call.args);
-            onToolEnd({ toolId: callId, name: call.name, result: output });
+        const chunk = decoder.decode(value);
+        const lines = chunk.split('\n');
 
-            // Track simulation runs as iterations
-            if (call.name === 'run_simulation') {
-              iterationCount++;
-              currentState.iterationCount = iterationCount;
-              currentState.progress = Math.min((iterationCount / maxIterations) * 100, 99);
+        let currentEvent = '';
+
+        for (const line of lines) {
+          if (line.startsWith('event: ')) {
+            currentEvent = line.slice(7);
+          } else if (line.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(line.slice(6));
+
+              switch (currentEvent) {
+                case 'status':
+                  // Status updates from the server
+                  break;
+
+                case 'text':
+                  fullText = data.content;
+                  onTextChunk(fullText);
+                  break;
+
+                case 'tool_start':
+                  onToolStart({ id: data.id, name: data.name, args: data.args });
+                  break;
+
+                case 'tool_end':
+                  onToolEnd({ toolId: data.id, name: data.name, result: data.result });
+                  break;
+
+                case 'progress':
+                  iterationCount = data.iterationCount;
+                  currentState = {
+                    ...currentState,
+                    iterationCount,
+                    progress: Math.min((iterationCount / maxIterations) * 100, 99)
+                  };
+                  onProgress(currentState);
+                  break;
+
+                case 'done':
+                  fullText = data.text || fullText;
+                  currentInteractionId = data.interactionId || currentInteractionId;
+                  iterationCount = data.iterationCount || iterationCount;
+                  break;
+
+                case 'error':
+                  throw new Error(data.message);
+              }
+            } catch (parseError) {
+              // Ignore parse errors for incomplete chunks
             }
           }
-        }
-
-        onProgress(currentState);
-
-        // Safety: stop after max iterations
-        if (iterationCount >= maxIterations) {
-          currentState.status = 'completed';
-          currentState.progress = 100;
-          onProgress(currentState);
-          break;
         }
       }
 
       // Final state
-      currentState.status = 'completed';
-      currentState.progress = 100;
+      currentState = {
+        id: currentInteractionId,
+        status: 'completed',
+        progress: 100,
+        iterationCount,
+        maxIterations,
+        researchGoal
+      };
       onProgress(currentState);
 
       return {

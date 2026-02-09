@@ -11,9 +11,9 @@ const INITIAL_SESSION: Session = {
   previewText: 'Analyzing sand friction...',
   lastActive: Date.now(),
   status: 'idle',
-  activeRobotId: 'robot_1',
+  activeRobotId: 'robot_3',
   robots: [
-    {
+    /*{
       id: 'robot_1',
       name: 'HX-9000 Hexapod',
       type: 'Multi-legged Walker',
@@ -57,6 +57,32 @@ const INITIAL_SESSION: Session = {
       sensorReadings: {
         'IMU_Pitch': '0.0°',
         'Lidar_Front': 'Offline'
+      }
+    },*/
+    {
+      id: 'robot_3',
+      name: 'SkyWatch-X4 Quadcopter',
+      type: 'Aerial UAV',
+      status: 'Grounded',
+      currentVideoUrl: 'https://pub-d81bd376745a4ee1b9073461f2c2651d.r2.dev/frame_1671607621205360381.jpg',
+      videoUrl: 'https://pub-d81bd376745a4ee1b9073461f2c2651d.r2.dev/uav_scenes.mp4',
+      telemetry: {
+        last_run_status: 'idle',
+        battery: '95%',
+        gps_fix: '3D',
+        altitude: '0m'
+      },
+      jointAngles: {
+        'rotor_fl': 0,
+        'rotor_fr': 0,
+        'rotor_bl': 0,
+        'rotor_br': 0,
+      },
+      sensorReadings: {
+        'Altitude': '0m',
+        'GPS_Quality': '98%',
+        'Wind_Speed': '2.1m/s',
+        'Battery_V': '16.2V'
       }
     }
   ],
@@ -148,6 +174,7 @@ export default function App() {
 
     try {
       const result = await geminiService.runAutonomousResearch(
+        sessionId,
         args.research_goal,
         maxIterations,
         successCriteria,
@@ -271,6 +298,7 @@ export default function App() {
 
         // Call Gemini Service with Interactions API
         const result = await geminiService.sendMessage(
+            activeSessionId,
             activeSession.messages,
             text,
             activeSession.lastInteractionId,

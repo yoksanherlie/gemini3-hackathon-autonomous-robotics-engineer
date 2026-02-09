@@ -44,6 +44,7 @@ export interface RobotContext {
   type: string;
   status: string;
   currentVideoUrl?: string;
+  videoUrl?: string;
   telemetry?: Record<string, any>;
   jointAngles?: Record<string, number>;
   sensorReadings?: Record<string, any>;
