@@ -13,7 +13,7 @@ const INITIAL_SESSION: Session = {
   status: 'idle',
   activeRobotId: 'robot_3',
   robots: [
-    /*{
+    {
       id: 'robot_1',
       name: 'HX-9000 Hexapod',
       type: 'Multi-legged Walker',
@@ -58,7 +58,7 @@ const INITIAL_SESSION: Session = {
         'IMU_Pitch': '0.0°',
         'Lidar_Front': 'Offline'
       }
-    },*/
+    },
     {
       id: 'robot_3',
       name: 'SkyWatch-X4 Quadcopter',
@@ -89,7 +89,7 @@ const INITIAL_SESSION: Session = {
   messages: [{
     id: 'msg_0',
     role: 'model',
-    text: "Welcome to the Autonomous Research Lab. I'm connected to the fleet management system. I have access to the HX-9000 Hexapod and QS-V4 Quadruped. What is our objective today?",
+    text: "Welcome to the Autonomous Research Lab. I'm connected to the fleet management system. I have access to the HX-9000 Hexapod, QS-V4 Quadruped and SkyWatch-X4 Quadcopter. What is our objective today?",
     timestamp: Date.now()
   }]
 };
