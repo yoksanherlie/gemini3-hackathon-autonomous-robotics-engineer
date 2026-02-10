@@ -1,10 +1,7 @@
 import { Message, ToolCall, ToolResult, InteractionState, ThinkingStep } from "../types";
-import dotenv from 'dotenv';
-
-dotenv.config({ path: '.env'});
 
 // API base URL - proxied through Vite in development
-const API_BASE = `${process.env.API_BASE_URL || '/api/gemini'}`;
+const API_BASE = `https://express-wine-alpha.vercel.app/api/gemini`;
 
 // Tool Execution Result from backend
 interface ToolExecutionResponse {
