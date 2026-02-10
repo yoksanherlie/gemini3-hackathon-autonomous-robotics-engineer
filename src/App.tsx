@@ -7,8 +7,8 @@ import { geminiService } from './services/geminiService';
 
 const INITIAL_SESSION: Session = {
   id: 'sess_001',
-  title: 'Hexapod Gait Optimization',
-  previewText: 'Analyzing sand friction...',
+  title: 'Gusty Wind Optimization',
+  previewText: 'Analyzing air friction...',
   lastActive: Date.now(),
   status: 'idle',
   activeRobotId: 'robot_3',
